@@ -7,7 +7,7 @@
 
 import logging
 import time
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass
 from enum import Enum
 from tqdm import tqdm
@@ -29,6 +29,12 @@ from seamless_communication.models.unity import (
     UnitYModel,
     UnitYT2UModel,
 )
+from torch.distributed.fsdp import (
+    FullyShardedDataParallel as FSDP,
+    FullStateDictConfig,
+    StateDictType,
+)
+
 
 logger = logging.getLogger(__name__)
 
@@ -100,7 +106,8 @@ class UnitYFinetuneWrapper(nn.Module):
     def forward(
         self, batch: dataloader.MultimodalSeqsBatch
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
-        dummy_context = contextmanager(lambda: iter([None]))()
+        dummy_context = nullcontext()
+        # dummy_context = contextmanager(lambda: iter([None]))()
         with torch.no_grad() if self.freeze_s2t else dummy_context:  # type:ignore
             assert batch.speech_to_text.src_tokens is not None
             seqs = batch.speech_to_text.src_tokens.to(self.device)
@@ -125,7 +132,7 @@ class UnitYFinetuneWrapper(nn.Module):
             return (text_logits, None)
         assert self.model.t2u_model is not None
         assert batch.text_to_units.prev_output_tokens is not None
-        dummy_context = contextmanager(lambda: iter([None]))()
+        # dummy_context = contextmanager(lambda: iter([None]))()
         with torch.no_grad() if self.freeze_t2u else dummy_context:  # type:ignore
             if not isinstance(self.model.t2u_model, UnitYT2UModel):
                 raise NotImplementedError(
@@ -252,14 +259,25 @@ class UnitYFinetune:
         freeze_modules: Optional[List[Union[str, torch.nn.Module]]] = None
     ):
         self.params = params
-        self.calc_loss = CalcLoss(
-            label_smoothing=self.params.label_smoothing,
-            s2t_vocab_info=model.target_vocab_info,
-            t2u_vocab_info=model.t2u_model.target_vocab_info
-            if model.t2u_model is not None
-            else None,
-        )
         
+        if isinstance(model, FSDP):
+            unity_model = model.model
+            self.calc_loss = CalcLoss(
+                label_smoothing=self.params.label_smoothing,
+                s2t_vocab_info=unity_model.target_vocab_info,
+                t2u_vocab_info=unity_model.t2u_model.target_vocab_info
+                if unity_model.t2u_model is not None
+                else None,
+            )
+        else:
+            self.calc_loss = CalcLoss(
+                label_smoothing=self.params.label_smoothing,
+                s2t_vocab_info=model.target_vocab_info,
+                t2u_vocab_info=model.t2u_model.target_vocab_info
+                if model.t2u_model is not None
+                else None,
+            )
+
         self.model = self._wrap_model_for_trainining(model=model)
         if freeze_modules:
             self._freeze_modules(freeze_modules)
@@ -275,7 +293,7 @@ class UnitYFinetune:
             eps=1e-08,
             maximize=False,
             weight_decay=0.0,
-            fused=(self.params.device.type == "cuda"),
+            fused=False #(self.params.device.type == "cuda"),
         )
         self.lr_scheduler = MyleLR(
             optimizer=self.optimizer,
@@ -300,6 +318,10 @@ class UnitYFinetune:
         self.is_best_state = False
 
     def _wrap_model_for_trainining(self, model: UnitYModel) -> nn.Module:
+        # wrapped_model = UnitYFinetuneWrapper(
+        #     model=model, mode=self.params.finetune_mode, device=self.params.device
+        # )
+        return model
         wrapped_model = UnitYFinetuneWrapper(
             model=model, mode=self.params.finetune_mode, device=self.params.device
         )
@@ -308,7 +330,7 @@ class UnitYFinetune:
         find_unused = self.params.finetune_mode == FinetuneMode.TEXT_TO_SPEECH
         return nn.parallel.DistributedDataParallel(
             wrapped_model,
-            device_ids=[dist_utils.get_local_rank()],
+            device_ids=[dist_utils._get_localrank()],
             find_unused_parameters=find_unused,
         )
         
@@ -337,7 +359,10 @@ class UnitYFinetune:
 
     @torch.no_grad()
     def _eval_model(self, n_batches: int) -> None:
-        """Calc avg loss on eval dataset and update evaluation stats"""
+        """Calc avg loss on eval dataset and update evaluation stats
+           FSDP or DDP의 경우, 각 rank의 dataloader에서 n_batches만큼 샘플링된 미니배치에서 loss를 다 더하고, loss_hist.reduce()에서 다른 rank들의 loss_hist를 받아와 본인것에 더하면서, 결과적으로 모든 rank들이 동일한 loss_hist 값(device만 다른)를 갖게됨
+           eval_data_loader로부터 n_batches개의 mini_batch로 평가. 만약 n_batches가 data_loader들의 배치크기들중 큰것이 있다면, 코드가 멈춘다.
+        """
         if self.eval_data_loader is None:
             return
         logger.info(f"Evaluation Step {self.update_idx // self.params.eval_steps}...")
@@ -347,8 +372,8 @@ class UnitYFinetune:
             if n_batches == 0:
                 break
             assert batch.speech_to_text.src_tokens is not None
-            with torch.autocast(device_type=self.params.device.type, dtype=self.params.float_dtype):
-                loss = self.calc_loss(batch, *self.model(batch))
+            # with torch.autocast(device_type=self.params.device.type, dtype=self.params.float_dtype):
+            loss = self.calc_loss(batch, *self.model(batch))
             if loss.isnan():
                 logger.warning("Eval batch loss value is NaN, skipping")
                 continue
@@ -374,44 +399,60 @@ class UnitYFinetune:
         """Run one train step"""
         self.model.train()
         self.optimizer.zero_grad()
-        with torch.autocast(device_type=self.params.device.type, dtype=self.params.float_dtype):
-            tokens, units = self.model(batch)
+        # with torch.autocast(device_type=self.params.device.type, dtype=self.params.float_dtype):
+        tokens, units = self.model(batch)
         
         loss = self.calc_loss(batch, tokens, units)
         if loss.isnan().any().item():
             logger.error(batch.speech_to_text)
             raise RuntimeError("Train loss is NaN! Something is wrong in the model!")
-        
-        self.grad_scaler.scale(loss).backward()
-        self.grad_scaler.step(self.optimizer)
-        self.grad_scaler.update()
+
+        loss.backward()
+        self.optimizer.step() 
+        # self.grad_scaler.scale(loss).backward()
+        # self.grad_scaler.step(self.optimizer) # 뭔가 optimizer step이 이루어지지 않아서 lr_scheduler step시 순서 맞추라고 warning발생.
+        # self.grad_scaler.update()
         self.lr_scheduler.step()
         
         assert batch.speech_to_text.src_tokens is not None
-        self.train_loss_hist.update(1, loss.item())
-        self._train_step_log()
+        self.train_loss_hist.update(1, loss.item()) # add loss per batch
+        self._train_step_log() # gather -> all_reduce
         self.update_idx += 1
 
     def _save_model(self) -> None:
         logger.info("Saving model")
+        dist.barrier()
+        save_policy = FullStateDictConfig(offload_to_cpu=True, rank0_only=True)
+        with FSDP.state_dict_type(
+            self.model, StateDictType.FULL_STATE_DICT, save_policy
+        ):
+            cpu_state = self.model.state_dict() # all rank should call this function
         if dist_utils.is_main_process():
+            print(f"--> saving model ... at rank : {dist.get_rank()}")
+            currEpoch = (
+                f"-{self.params.finetune_mode}-ep" + str(self.epoch_idx) + "-eval_loss" + str(round(self.best_eval_loss, 4)) + ".pt"
+            )
+            print(f"--> attempting to save model prefix {currEpoch}")
+            save_name = self.params.model_name + currEpoch
+            print(f"--> saving as model name {save_name}")
+
             torch.save({
-                "model_name": self.params.model_name,
-                "model": {
+                "model_name" : self.params.model_name,
+                "model" : {
                     key.replace("module.model.model.", ""): value
-                    for key, value in self.model.state_dict().items()
+                    for key, value in cpu_state.items()
                 }
-            }, self.params.save_model_path)
+            }, save_name)
         if dist_utils.is_dist_initialized():
             dist.barrier()
 
     def run(self) -> None:
         logger.info("Start Finetuning")
         self._reset_stats()
-        self._eval_model(n_batches=100)
+        self._eval_model(n_batches=2)
         
         train_dataloader = self.train_data_loader.get_dataloader()
-        
+
         while self.epoch_idx < self.params.max_epochs and self.patience_left:
             for train_batch in tqdm(train_dataloader, desc="Training Steps"):
                 # Run batch through train step
@@ -422,9 +463,10 @@ class UnitYFinetune:
                     continue
                 
                 # Clear GPU memory for eval
+                dist.barrier() # wait all ranks done
                 torch.cuda.empty_cache()
-                self._eval_model(n_batches=100)
-                    
+                self._eval_model(n_batches=2)
+                
                 # Save the current model if its the best we've ever had
                 if self.is_best_state:
                     self._save_model()

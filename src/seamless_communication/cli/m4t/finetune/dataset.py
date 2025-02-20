@@ -12,12 +12,20 @@ import logging
 import os
 from pathlib import Path
 from tqdm import tqdm
-
+import sys
 import torch
+
+# 지정된 경로 (예: '/custom/path/to/huggingface')
+custom_path = "/data/donggukang/seamless_test/seamless_communication/src"
+
+# sys.path에 추가하여 우선적으로 패키지를 로드하도록 함
+if custom_path not in sys.path:
+    sys.path.insert(0, custom_path)
 
 from datasets import load_dataset
 from seamless_communication.datasets.huggingface import (
     Speech2SpeechFleursDatasetBuilder,
+    Speech2TextDatasetBuilder,
     SpeechTokenizer,
 )
 from seamless_communication.models.unit_extractor import UnitExtractor
@@ -181,6 +189,33 @@ def download_gigaspeech(subset: str, huggingface_token: str, save_directory: str
         logger.info(f"Manifest for GigaSpeech-{subset}-{split} saved to: {manifest_path}")
 
 
+def load_custom_s2tt_dataset(json_path, source_lang, target_lang, save_directory, name):
+    _check_lang_code_mapping(source_lang)
+    _check_lang_code_mapping(target_lang)
+    device = (
+        torch.device("cuda:0") if torch.cuda.device_count() > 0 else torch.device("cpu")
+    )
+    tokenizer = UnitSpeechTokenizer(device=device)
+    dataset_iterator = Speech2TextDatasetBuilder(
+        json_path=json_path,
+        source_lang=source_lang,
+        target_lang=target_lang,
+        skip_source_audio=False, # don't extract units from source audio
+        skip_target_audio=True,
+        speech_tokenizer=tokenizer
+    )
+    manifest_path: str = os.path.join(save_directory, f"{name}_manifest.json")
+    with open(manifest_path, "w") as fp_out:
+        for idx, sample in enumerate(dataset_iterator.__iter__(), start=1):
+            # correction as FleursDatasetBuilder return fleurs lang codes
+            sample.source.lang = source_lang
+            sample.target.lang = target_lang
+            sample.source.waveform = None  # already extracted units
+            fp_out.write(json.dumps(dataclasses.asdict(sample)) + "\n")
+    logger.info(f"Saved {idx} samples for split={name} to {manifest_path}")
+    logger.info(f"Manifest saved to: {manifest_path}")
+
+
 def init_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description=(
@@ -210,7 +245,8 @@ def init_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--split",
         type=str,
-        required=True,
+        default="test",
+        required=False,
         help="Dataset split/shard to download (`train`, `validation`, `test`)",
     )
     parser.add_argument(
@@ -226,13 +262,20 @@ def init_parser() -> argparse.ArgumentParser:
         default=None,
         help="Your HuggingFace token, this is necessary for some datasets like GigaSpeech.",
     )
+    parser.add_argument(
+        "--json_path",
+        type=str,
+        required=False,
+        default=None,
+        help="Your json_path.",
+    )
     return parser
 
 
 def main() -> None:
     args = init_parser().parse_args()
-    assert args.name in SUPPORTED_DATASETS, \
-        f"The only supported datasets are `{SUPPORTED_DATASETS}`. Please use one of these in `--name`."
+    # assert args.name in SUPPORTED_DATASETS, \
+    #     f"The only supported datasets are `{SUPPORTED_DATASETS}`. Please use one of these in `--name`."
 
     if args.name == 'google/fleurs':
         download_fleurs(args.source_lang, args.target_lang, args.split, args.save_dir)
@@ -240,7 +283,15 @@ def main() -> None:
         assert args.huggingface_token is not None, \
             "Your HuggingFace token is necessary for GigaSpeech. Please read the GigaSpeech agreement."
         download_gigaspeech(args.split, args.huggingface_token, args.save_dir)
-
+    else:
+        load_custom_s2tt_dataset(
+            json_path=args.json_path,
+            source_lang=args.source_lang,
+            target_lang=args.target_lang,
+            save_directory=args.save_dir,
+            name = args.name
+        )
+    
 
 if __name__ == "__main__":
     main()

@@ -27,6 +27,7 @@ from seamless_communication.models.unity.unit_tokenizer import (
     UnitTokenEncoder,
     UnitTokenizer,
 )
+from torch.utils.data.distributed import DistributedSampler
 
 logger = logging.getLogger(__name__)
 
@@ -119,15 +120,18 @@ class UnitYDataLoader:
         self.max_src_tokens_per_batch = max_src_tokens_per_batch
 
     def get_dataloader(self) -> DataLoader[SeqsBatch]:
-        subset = split_dataset_by_node(
-            self.dataset,
-            rank=self.batching_config.rank,
-            world_size=self.batching_config.world_size,
-        )
+        # subset = split_dataset_by_node(
+        #     self.dataset,
+        #     rank=self.batching_config.rank,
+        #     world_size=self.batching_config.world_size,
+        # )
+        # if DDP or FSDP
+        self.sampler = DistributedSampler(self.dataset, rank=self.batching_config.rank, num_replicas=self.batching_config.world_size, shuffle=True)
         data_loader = DataLoader(
-            dataset=subset,
+            dataset=self.dataset,#subset,
             batch_size=self.batching_config.batch_size,
-            shuffle=True,
+            sampler=self.sampler,
+            # shuffle=True,
             num_workers=self.batching_config.num_workers,
             collate_fn=self._prepare_batch,
             worker_init_fn=worker_init_fn,

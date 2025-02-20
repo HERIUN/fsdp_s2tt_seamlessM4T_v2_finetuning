@@ -15,6 +15,8 @@ import torch
 from datasets import load_dataset
 
 from .datatypes import LangPairSample, MultimodalSample
+import json
+import soundfile as sf
 
 logger = logging.getLogger(__name__)
 
@@ -226,6 +228,106 @@ class Speech2TextGigaspeechDatasetBuilder:
 
     def __iter__(self) -> Iterable[LangPairSample]:
         logger.info(f"Loading {self.target_lang} samples")
+        target_samples: Dict[int, MultimodalSample] = {}
+        for idx, sample in enumerate(
+            self.iterate_lang_audio_samples(lang=self.target_lang)
+        ):
+            if idx and idx % 100 == 0:
+                logger.info(f"..loaded {idx} target samples")
+            target_samples[sample.id] = sample
+
+        logger.info(f"Loading {self.source_lang} samples")
+        for idx, sample in enumerate(
+            self.iterate_lang_audio_samples(lang=self.source_lang)
+        ):
+            if idx and idx % 100 == 0:
+                logger.info(f"..loaded {idx} source samples")
+            if sample.id in target_samples:
+                yield LangPairSample(source=sample, target=target_samples[sample.id])
+
+
+class Speech2TextDatasetBuilder:
+
+    def __init__(
+            self, 
+            json_path, 
+            source_lang="ko", 
+            target_lang="en",
+            skip_source_audio: bool = True,
+            skip_target_audio: bool = True,
+            speech_tokenizer: Optional[SpeechTokenizer] = None,
+            audio_dtype: torch.dtype = torch.float32,
+            ):
+        with open(json_path, "r", encoding="utf-8") as f:
+            self.data = json.load(f)
+
+        self.target_lang = target_lang
+        self.source_lang = source_lang
+        self.skip_source_audio = skip_source_audio
+        self.skip_target_audio = skip_target_audio
+        self.speech_tokenizer = speech_tokenizer
+        self.audio_dtype = audio_dtype
+
+    def _prepare_sample(
+        self,
+        sample_id: int,
+        lang: str,
+        text: str,
+        audio_local_path: Optional[str] = None,
+        waveform_npy: Optional[np.ndarray] = None,
+        sampling_rate: Optional[int] = None,
+    ) -> MultimodalSample:
+        should_skip_audio = (
+            lang == self.target_lang
+            and self.skip_target_audio
+            or lang == self.source_lang
+            and self.skip_source_audio
+            or waveform_npy is None
+        )
+        if not should_skip_audio:
+            waveform = torch.from_numpy(waveform_npy).to(self.audio_dtype)
+        else:
+            waveform = None
+        if self.speech_tokenizer is not None and not should_skip_audio:
+            assert waveform is not None
+            assert sampling_rate is not None
+            units_tensor = self.speech_tokenizer.encode(
+                waveform, sampling_rate
+            ).reshape(-1)
+            units = units_tensor.tolist()
+        else:
+            units = None
+        return MultimodalSample(
+            id=sample_id,
+            lang=lang,
+            text=text.strip(),
+            audio_local_path=audio_local_path,
+            waveform=waveform,
+            sampling_rate=sampling_rate,
+            units=units,
+        )
+
+
+    def iterate_lang_audio_samples(self, lang: str) -> Iterable[MultimodalSample]:
+        for idx,d in enumerate(self.data):
+            audio_array, sr =  sf.read(d["audio_path"])
+            (sample_id, audio_local_path, waveform, sampling_rate, text) = (
+                idx,
+                d["audio_path"],
+                audio_array,
+                sr,
+                d[lang],
+            )
+            yield self._prepare_sample(
+                sample_id=sample_id,
+                audio_local_path=audio_local_path,
+                waveform_npy=waveform,
+                sampling_rate=sampling_rate,
+                text=text,
+                lang=lang,
+            )
+
+    def __iter__(self) -> Iterable[LangPairSample]:
         target_samples: Dict[int, MultimodalSample] = {}
         for idx, sample in enumerate(
             self.iterate_lang_audio_samples(lang=self.target_lang)

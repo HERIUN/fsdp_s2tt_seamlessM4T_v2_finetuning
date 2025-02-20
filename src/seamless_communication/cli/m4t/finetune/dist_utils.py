@@ -49,7 +49,7 @@ def is_main_process() -> bool:
 
 def init_distributed(loggers: List[logging.Logger]) -> None:
     """Initializes the distributed backend"""
-    torch.multiprocessing.set_start_method("spawn")
+    # torch.multiprocessing.set_start_method("spawn")
     if "RANK" not in os.environ:
         logger.error(
             "Cannot init disributed context, as environment varaibles are not set."
@@ -72,5 +72,5 @@ def init_distributed(loggers: List[logging.Logger]) -> None:
     if not is_main_process():
         for to_mute in loggers:
             to_mute.setLevel(logging.ERROR)
-    torch.cuda.set_device(local_rank)
-    dist.barrier()
+    # torch.cuda.set_device(local_rank)
+    # dist.barrier()
