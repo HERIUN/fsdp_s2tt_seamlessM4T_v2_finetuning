@@ -1,7 +1,9 @@
 seamlessM4Tv2 finetuning with custom data with FSDP
 
 0.(optional). make sample s2tt data(n_samples=100) with chatgpt and google tts
+```
 python make_sample_data.py
+```
 
 1. prepare custom json data.
 output.json : audio path is source language_speech. 
