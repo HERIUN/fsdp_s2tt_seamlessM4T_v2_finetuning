@@ -26,6 +26,7 @@ from datasets import load_dataset
 from seamless_communication.datasets.huggingface import (
     Speech2SpeechFleursDatasetBuilder,
     Speech2TextDatasetBuilder,
+    Speech2TextDatasetHFBuilder,
     SpeechTokenizer,
 )
 from seamless_communication.models.unit_extractor import UnitExtractor
@@ -216,6 +217,33 @@ def load_custom_s2tt_dataset(json_path, source_lang, target_lang, save_directory
     logger.info(f"Manifest saved to: {manifest_path}")
 
 
+def load_custom_s2tt_hf_dataset(dataset_name, split, source_lang, target_lang, save_directory, hf_token, target_text_column):
+    _check_lang_code_mapping(source_lang)
+    _check_lang_code_mapping(target_lang)
+
+    dataset_iterator = Speech2TextDatasetHFBuilder(
+        dataset_name=dataset_name,
+        source_lang=source_lang,
+        target_lang=target_lang,
+        split=split,
+        hf_token=hf_token,
+        target_text_column=target_text_column,
+        save_directory=save_directory
+    )
+
+    name = dataset_name.split("/")[-1]
+    manifest_path: str = os.path.join(save_directory, f"{name}_{split}_manifest.json")
+    with open(manifest_path, "w") as fp_out:
+        for idx, sample in enumerate(dataset_iterator.__iter__(), start=1):
+            # correction as FleursDatasetBuilder return fleurs lang codes
+            sample.source.lang = source_lang
+            sample.target.lang = target_lang
+            sample.source.waveform = None  # doesn't need. finetuning load wavfile directly. also convert np.ndarray to list is slow..
+            fp_out.write(json.dumps(dataclasses.asdict(sample)) + "\n")
+    logger.info(f"Saved {idx} samples for split={name} to {manifest_path}")
+    logger.info(f"Manifest saved to: {manifest_path}")
+
+
 def init_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description=(
@@ -269,6 +297,13 @@ def init_parser() -> argparse.ArgumentParser:
         default=None,
         help="Your json_path.",
     )
+    parser.add_argument(
+        "--target_text_column",
+        type=str,
+        required=False,
+        default=None,
+        help="hugging face dataset target text column",
+    )
     return parser
 
 
@@ -283,13 +318,23 @@ def main() -> None:
         assert args.huggingface_token is not None, \
             "Your HuggingFace token is necessary for GigaSpeech. Please read the GigaSpeech agreement."
         download_gigaspeech(args.split, args.huggingface_token, args.save_dir)
-    else:
+    elif args.json_path is not None:
         load_custom_s2tt_dataset(
             json_path=args.json_path,
             source_lang=args.source_lang,
             target_lang=args.target_lang,
             save_directory=args.save_dir,
             name = args.name
+        )
+    else:
+        load_custom_s2tt_hf_dataset(
+            dataset_name=args.name,
+            split=args.split,
+            source_lang=args.source_lang,
+            target_lang=args.target_lang,
+            save_directory=args.save_dir,
+            hf_token=args.huggingface_token,
+            target_text_column=args.target_text_column
         )
     
 

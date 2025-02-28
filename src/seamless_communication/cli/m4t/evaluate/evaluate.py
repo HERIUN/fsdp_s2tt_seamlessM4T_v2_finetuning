@@ -24,6 +24,8 @@ from fairseq2.data.typing import StringLike
 from fairseq2.typing import DataType, Device
 from torch import Tensor
 from tqdm import tqdm
+import sys
+sys.path.append("/data/donggukang/seamless_test/seamless_communication/src")
 
 from seamless_communication.cli.eval_utils import (
     compute_quality_metrics,
@@ -364,7 +366,7 @@ def run_eval(
 
 def load_checkpoint(model: UnitYModel, path: str, device = torch.device("cpu")) -> None:
     saved_model = torch.load(path, map_location=device)["model"]
-    saved_model = { k.replace("model.", ""): v for k, v in saved_model.items() }
+    # saved_model = { k.replace("model.", ""): v for k, v in saved_model.items() }
 
     def _select_keys(state_dict: Dict[str, Any], prefix: str) -> Dict[str, Any]:
         return {key.replace(prefix, ""): value for key, value in state_dict.items() if key.startswith(prefix)}
@@ -380,6 +382,7 @@ def load_checkpoint(model: UnitYModel, path: str, device = torch.device("cpu")) 
 
     assert model.final_proj is not None
     model.final_proj.load_state_dict(_select_keys(saved_model, "model.final_proj."))
+    del saved_model
 
 
 def main(optional_args: Optional[Dict[str, Any]] = None) -> None:

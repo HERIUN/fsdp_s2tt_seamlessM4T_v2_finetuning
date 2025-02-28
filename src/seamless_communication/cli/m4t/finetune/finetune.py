@@ -9,7 +9,7 @@ import logging
 import os
 import sys
 sys.path.append("/data/donggukang/seamless_test/seamless_communication/src")
-os.environ["CUDA_VISIBLE_DEVICES"]="0,3,4,7"
+os.environ["CUDA_VISIBLE_DEVICES"]="1,2,3,5"
 from pathlib import Path
 import torch.distributed as dist
 
@@ -44,16 +44,19 @@ import functools
 import torch.multiprocessing as mp
 
 
+def setup_logging(rank):
+    logger = logging.getLogger("finetune")
+    if rank==0:
+        logging.basicConfig(
+            level=logging.INFO,
+            format=f"%(asctime)s %(levelname)s -- %(name)s.{os.getpid()}: %(message)s",
+            filename="finetune.log",
+            filemode="w"
+        )
+    else:
+        logger.addHandler(logging.NullHandler())  # 다른 프로세스는 로그를 무시
 
-logging.basicConfig(
-    level=logging.INFO,
-    format=f"%(asctime)s %(levelname)s -- %(name)s.{os.getpid()}: %(message)s",
-    filename="finetune.log",
-    filemode="w"
-)
-
-logger = logging.getLogger("finetune")
-
+    return logger
 
 def init_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
@@ -98,7 +101,7 @@ def init_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--patience",
         type=int,
-        default=3,
+        default=10,
         help=(
             "Set early termination after `patience` number of evaluations "
             "without eval loss improvements"
@@ -188,34 +191,31 @@ def custom_auto_wrap_policy(module, recurse, **kwargs):
     return size_based_auto_wrap_policy(module, recurse, kwargs['nonwrapped_numel'], min_num_params=20000)
 
 
-def setup(rank, world_size, loggers):
+def setup(rank, world_size):
     os.environ['MASTER_ADDR'] = 'localhost'
     os.environ['MASTER_PORT'] = '12355'
 
     rank = int(rank)
     world_size = int(world_size)
     local_rank = int(rank)
-    logger.info(
-        f"Rank={rank} local rank={local_rank}, world_size={world_size}, is_master={rank == 0}"
-    )
     dist.init_process_group(
         backend="nccl",
         init_method="env://",
         world_size=world_size,
         rank=rank,
     )
-    logger.info(f"Setting cuda:{local_rank} as main device")
-    if not dist.get_rank()==0:
-        for to_mute in loggers:
-            to_mute.setLevel(logging.ERROR)
+
+    torch.cuda.set_device(local_rank)
+    dist.barrier()
 
 def cleanup():
-    dist.destroy_process_group()
+    if dist.is_initialized():
+        dist.destroy_process_group()
 
 def fsdp_main(rank, world_size) -> None:
     args = init_parser().parse_args()
-    # dist_utils.init_distributed([logger, trainer.logger])
-    setup(rank, world_size, [logger, trainer.logger])
+    logger = setup_logging(rank)
+    setup(rank, world_size) 
     float_dtype = torch.float16 if torch.device(args.device).type != "cpu" else torch.bfloat16
     
     text_tokenizer = load_unity_text_tokenizer(args.model_name)
@@ -252,9 +252,6 @@ def fsdp_main(rank, world_size) -> None:
     
     if model.text_encoder is not None:
         model.text_encoder = None
-    
-    # set rank's device(before torch.cuda.current_device())
-    torch.cuda.set_device(rank)
 
     wrapped_model = UnitYFinetuneWrapper(
         model=model, mode=finetune_params.finetune_mode, device=torch.device(rank))
@@ -327,5 +324,5 @@ if __name__ == "__main__":
 
     mp.spawn(fsdp_main,
         args=(WORLD_SIZE,),
-        nprocs=WORLD_SIZE,
-        join=True)
+        nprocs=WORLD_SIZE
+        )

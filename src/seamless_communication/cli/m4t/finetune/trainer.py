@@ -428,14 +428,11 @@ class UnitYFinetune:
         ):
             cpu_state = self.model.state_dict() # all rank should call this function
         if dist_utils.is_main_process():
-            print(f"--> saving model ... at rank : {dist.get_rank()}")
+            logger.info(f"--> saving model ... at rank : {dist.get_rank()}")
             currEpoch = (
                 f"-{self.params.finetune_mode}-ep" + str(self.epoch_idx) + "-eval_loss" + str(round(self.best_eval_loss, 4)) + ".pt"
             )
-            print(f"--> attempting to save model prefix {currEpoch}")
             save_name = self.params.model_name + currEpoch
-            print(f"--> saving as model name {save_name}")
-
             torch.save({
                 "model_name" : self.params.model_name,
                 "model" : {
@@ -443,13 +440,15 @@ class UnitYFinetune:
                     for key, value in cpu_state.items()
                 }
             }, save_name)
+            logger.info(f"--> saving as model done : {save_name}")
         if dist_utils.is_dist_initialized():
             dist.barrier()
 
     def run(self) -> None:
+        eval_n_batches = 100
         logger.info("Start Finetuning")
         self._reset_stats()
-        self._eval_model(n_batches=2)
+        self._eval_model(n_batches=eval_n_batches)
         
         train_dataloader = self.train_data_loader.get_dataloader()
 
@@ -465,7 +464,7 @@ class UnitYFinetune:
                 # Clear GPU memory for eval
                 dist.barrier() # wait all ranks done
                 torch.cuda.empty_cache()
-                self._eval_model(n_batches=2)
+                self._eval_model(n_batches=eval_n_batches)
                 
                 # Save the current model if its the best we've ever had
                 if self.is_best_state:

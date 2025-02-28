@@ -131,7 +131,6 @@ class UnitYDataLoader:
             dataset=self.dataset,#subset,
             batch_size=self.batching_config.batch_size,
             sampler=self.sampler,
-            # shuffle=True,
             num_workers=self.batching_config.num_workers,
             collate_fn=self._prepare_batch,
             worker_init_fn=worker_init_fn,
