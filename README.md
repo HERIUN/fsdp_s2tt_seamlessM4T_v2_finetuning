@@ -22,6 +22,7 @@ output.json : audio path is source language_speech.
     ...
 ]
 ```
+or hugging face audio datasets. check src/seamless_communication/cli/m4t/finetune/dataset.py ```load_custom_s2tt_hf_dataset```
 
 2. convert seamless format
 ```sh
@@ -39,7 +40,7 @@ sys.path.append("/data/donggukang/seamless_test/seamless_communication/src")
 os.environ["CUDA_VISIBLE_DEVICES"]="0,3,4,7"
 ```
 
-3. finetune s2tt with fsdp
+4. finetune s2tt with fsdp
 ```sh
 python src/seamless_communication/cli/m4t/finetune/finetune.py \
    --mode SPEECH_TO_TEXT \
